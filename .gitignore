@@ -1,0 +1,46 @@
+# Local project memory
+.pensieve/
+
+# Linux kbuild outputs
+*.o
+*.ko
+*.ko.*
+*.mod
+*.mod.c
+*.symvers
+*.order
+.*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Module.markers
+
+# Generated module/package artifacts
+*.rpm
+*.src.rpm
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7.gz
+*.8.gz
+
+# Static-analysis and navigation indexes
+tags
+TAGS
+cscope.*
+ncscope.*
+compile_commands.json
+
+# Editor and local OS files
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+.DS_Store
+
+# Logs and crash dumps
+*.log
+core
+core.*
