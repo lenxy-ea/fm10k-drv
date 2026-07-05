@@ -588,9 +588,8 @@ static int fm10k_set_ringparam(struct net_device *netdev,
 		goto clear_reset;
 	}
 
-	fm10k_down(interface);
-	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
-		err = -EBUSY;
+	err = fm10k_down(interface);
+	if (err) {
 		vfree(temp_ring);
 		goto clear_reset;
 	}

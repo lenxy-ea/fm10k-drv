@@ -392,9 +392,8 @@ static void fm10k_free_udp_port_info(struct fm10k_intfc *interface)
 	while (port) {
 		list_del(&port->list);
 		kfree(port);
-		port = list_first_entry_or_null(&interface->geneve_port,
-						struct fm10k_udp_port,
-						list);
+		port = list_first_entry_or_null(&interface->vxlan_port,
+						struct fm10k_udp_port, list);
 	}
 
 	/* flush all entries from geneve list */
@@ -403,9 +402,8 @@ static void fm10k_free_udp_port_info(struct fm10k_intfc *interface)
 	while (port) {
 		list_del(&port->list);
 		kfree(port);
-		port = list_first_entry_or_null(&interface->vxlan_port,
-						struct fm10k_udp_port,
-						list);
+		port = list_first_entry_or_null(&interface->geneve_port,
+						struct fm10k_udp_port, list);
 	}
 }
 
@@ -708,18 +706,19 @@ err_setup_tx:
  * fm10k_close - Disables a network interface
  * @netdev: network interface device structure
  *
-	 * Returns 0, or -EBUSY if DMA did not quiesce and ring resources must
-	 * remain allocated.
+ * Returns 0, or -EBUSY if DMA did not quiesce and ring resources must
+ * remain allocated.
  *
  * The close entry point is called when an interface is de-activated
-	 * by the OS.  The hardware is still under the drivers control, but
-	 * needs to be disabled.  A global MAC reset is issued to stop the
-	 * hardware, and transmit/receive resources are freed once DMA is no
-	 * longer active.
+ * by the OS.  The hardware is still under the drivers control, but
+ * needs to be disabled.  A global MAC reset is issued to stop the
+ * hardware, and transmit/receive resources are freed once DMA is no
+ * longer active.
  **/
 int fm10k_close(struct net_device *netdev)
 {
 	struct fm10k_intfc *interface = netdev_priv(netdev);
+	int err;
 
 	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
 		netdev_err(netdev,
@@ -727,17 +726,13 @@ int fm10k_close(struct net_device *netdev)
 		return -EBUSY;
 	}
 
-	fm10k_down(interface);
+	err = fm10k_down(interface);
+	if (err)
+		return err;
 
 	fm10k_qv_free_irq(interface);
 
 	fm10k_free_udp_port_info(interface);
-
-	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
-		netdev_err(netdev,
-			   "leaving Tx/Rx resources allocated because DMA did not quiesce\n");
-		return -EBUSY;
-	}
 
 	fm10k_free_all_tx_resources(interface);
 	fm10k_free_all_rx_resources(interface);

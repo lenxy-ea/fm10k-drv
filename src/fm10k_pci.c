@@ -2053,7 +2053,7 @@ static void fm10k_napi_disable_all(struct fm10k_intfc *interface)
 	}
 }
 
-void fm10k_down(struct fm10k_intfc *interface)
+int fm10k_down(struct fm10k_intfc *interface)
 {
 	struct net_device *netdev = interface->netdev;
 	struct fm10k_hw *hw = &interface->hw;
@@ -2062,7 +2062,7 @@ void fm10k_down(struct fm10k_intfc *interface)
 
 	/* signal that we are down to the interrupt handler and service task */
 	if (test_and_set_bit(__FM10K_DOWN, interface->state))
-		return;
+		return 0;
 
 	fm10k_mask_q_vectors(interface);
 
@@ -2145,12 +2145,14 @@ skip_tx_dma_drain:
 		set_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state);
 		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
 		fm10k_service_event_schedule(interface);
-		return;
+		return -EBUSY;
 	}
 
 	/* free any buffers still on the rings */
 	fm10k_clean_all_tx_rings(interface);
 	fm10k_clean_all_rx_rings(interface);
+
+	return 0;
 }
 
 /**

@@ -547,7 +547,7 @@ int fm10k_qv_request_irq(struct fm10k_intfc *interface);
 int fm10k_register_pci_driver(void);
 void fm10k_unregister_pci_driver(void);
 int fm10k_up(struct fm10k_intfc *interface);
-void fm10k_down(struct fm10k_intfc *interface);
+int fm10k_down(struct fm10k_intfc *interface);
 void fm10k_update_stats(struct fm10k_intfc *interface);
 void fm10k_service_event_schedule(struct fm10k_intfc *interface);
 void fm10k_macvlan_schedule(struct fm10k_intfc *interface);
