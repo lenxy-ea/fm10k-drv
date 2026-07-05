@@ -995,8 +995,8 @@ static void fm10k_configure_tx(struct fm10k_intfc *interface)
  *
  * Configure the Rx descriptor ring after a reset.
  **/
-static void fm10k_configure_rx_ring(struct fm10k_intfc *interface,
-				    struct fm10k_ring *ring)
+static int fm10k_configure_rx_ring(struct fm10k_intfc *interface,
+				   struct fm10k_ring *ring)
 {
 	u64 rdba = ring->dma;
 	struct fm10k_hw *hw = &interface->hw;
@@ -1006,6 +1006,7 @@ static void fm10k_configure_rx_ring(struct fm10k_intfc *interface,
 	u32 rxint = FM10K_INT_MAP_DISABLE;
 	u8 rx_pause = interface->rx_pause;
 	u8 reg_idx = ring->reg_idx;
+	u16 i;
 
 	/* disable queue to avoid issues while updating state */
 	rxqctl = fm10k_read_reg(hw, FM10K_RXQCTL(reg_idx));
@@ -1013,7 +1014,21 @@ static void fm10k_configure_rx_ring(struct fm10k_intfc *interface,
 	fm10k_write_reg(hw, FM10K_RXQCTL(reg_idx), rxqctl);
 	fm10k_write_flush(hw);
 
-	/* possible poll here to verify ring resources have been cleaned */
+	for (i = 0; i < FM10K_QUEUE_DISABLE_TIMEOUT; i++) {
+		rxqctl = fm10k_read_reg(hw, FM10K_RXQCTL(reg_idx));
+		if (!~rxqctl || !(rxqctl & FM10K_RXQCTL_ENABLE))
+			break;
+
+		udelay(1);
+	}
+
+	if (i == FM10K_QUEUE_DISABLE_TIMEOUT) {
+		netdev_err(interface->netdev,
+			   "Rx queue %u failed to disable, RXQCTL=0x%08x\n",
+			   ring->queue_index, rxqctl);
+		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+		return FM10K_ERR_REQUESTS_PENDING;
+	}
 
 	/* set location and size for descriptor ring */
 	fm10k_write_reg(hw, FM10K_RDBAL(reg_idx), rdba & DMA_BIT_MASK(32));
@@ -1073,6 +1088,8 @@ static void fm10k_configure_rx_ring(struct fm10k_intfc *interface,
 
 	/* place buffers on ring for receive data */
 	fm10k_alloc_rx_buffers(ring, fm10k_desc_unused(ring));
+
+	return 0;
 }
 
 /**
@@ -1179,9 +1196,9 @@ static void fm10k_configure_dglort(struct fm10k_intfc *interface)
  *
  * Configure the Rx unit of the MAC after a reset.
  **/
-static void fm10k_configure_rx(struct fm10k_intfc *interface)
+static int fm10k_configure_rx(struct fm10k_intfc *interface)
 {
-	int i;
+	int i, err;
 
 	/* Configure SWPRI to PC map */
 	fm10k_configure_swpri_map(interface);
@@ -1190,10 +1207,14 @@ static void fm10k_configure_rx(struct fm10k_intfc *interface)
 	fm10k_configure_dglort(interface);
 
 	/* Setup the HW Rx Head and Tail descriptor pointers */
-	for (i = 0; i < interface->num_rx_queues; i++)
-		fm10k_configure_rx_ring(interface, interface->rx_ring[i]);
+	for (i = 0; i < interface->num_rx_queues; i++) {
+		err = fm10k_configure_rx_ring(interface, interface->rx_ring[i]);
+		if (err)
+			return err;
+	}
 
 	/* possible poll here to verify that Rx rings are now enabled */
+	return 0;
 }
 
 static void fm10k_napi_enable_all(struct fm10k_intfc *interface)
@@ -1204,6 +1225,18 @@ static void fm10k_napi_enable_all(struct fm10k_intfc *interface)
 	for (q_idx = 0; q_idx < interface->num_q_vectors; q_idx++) {
 		q_vector = interface->q_vector[q_idx];
 		napi_enable(&q_vector->napi);
+	}
+}
+
+static void fm10k_mask_q_vectors(struct fm10k_intfc *interface)
+{
+	struct fm10k_q_vector *q_vector;
+	int q_idx;
+
+	for (q_idx = 0; q_idx < interface->num_q_vectors; q_idx++) {
+		q_vector = interface->q_vector[q_idx];
+		if (q_vector->itr)
+			writel(FM10K_ITR_MASK_SET, q_vector->itr);
 	}
 }
 
@@ -1864,18 +1897,42 @@ err_out:
 	return err;
 }
 
-void fm10k_up(struct fm10k_intfc *interface)
+int fm10k_up(struct fm10k_intfc *interface)
 {
 	struct fm10k_hw *hw = &interface->hw;
+	int err, stop_err;
 
 	/* Enable Tx/Rx DMA */
-	hw->mac.ops.start_hw(hw);
+	pci_set_master(interface->pdev);
+	err = hw->mac.ops.start_hw(hw);
+	if (err) {
+		netdev_err(interface->netdev, "start_hw failed: %d\n", err);
+		return err;
+	}
 
 	/* configure Tx descriptor rings */
 	fm10k_configure_tx(interface);
 
 	/* configure Rx descriptor rings */
-	fm10k_configure_rx(interface);
+	err = fm10k_configure_rx(interface);
+	if (err) {
+		netdev_err(interface->netdev,
+			   "Rx configuration failed: %d\n", err);
+		fm10k_mask_q_vectors(interface);
+		stop_err = hw->mac.ops.stop_hw(hw);
+		if (stop_err) {
+			netdev_err(interface->netdev,
+				   "stop_hw failed after Rx configuration error: %d; disabling PCI bus mastering\n",
+				   stop_err);
+			if (!FM10K_REMOVED(hw->hw_addr))
+				pci_clear_master(interface->pdev);
+		}
+		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+		fm10k_service_event_schedule(interface);
+		fm10k_clean_all_tx_rings(interface);
+		fm10k_clean_all_rx_rings(interface);
+		return err;
+	}
 
 	/* configure interrupts */
 	hw->mac.ops.update_int_moderator(hw);
@@ -1898,6 +1955,8 @@ void fm10k_up(struct fm10k_intfc *interface)
 	/* kick off the service timer now */
 	hw->mac.get_host_state = true;
 	mod_timer(&interface->service_timer, jiffies);
+
+	return 0;
 }
 
 static void fm10k_napi_disable_all(struct fm10k_intfc *interface)
@@ -1920,6 +1979,8 @@ void fm10k_down(struct fm10k_intfc *interface)
 	/* signal that we are down to the interrupt handler and service task */
 	if (test_and_set_bit(__FM10K_DOWN, interface->state))
 		return;
+
+	fm10k_mask_q_vectors(interface);
 
 	/* call carrier off first to avoid false dev_watchdog timeouts */
 	netif_carrier_off(netdev);
@@ -1983,6 +2044,17 @@ skip_tx_dma_drain:
 			"due to pending requests hw was not shut down gracefully\n");
 	else if (err)
 		dev_err(&interface->pdev->dev, "stop_hw failed: %d\n", err);
+
+	if (err) {
+		fm10k_mask_q_vectors(interface);
+		if (!FM10K_REMOVED(hw->hw_addr)) {
+			dev_err(&interface->pdev->dev,
+				"disabling PCI bus mastering before releasing DMA buffers\n");
+			pci_clear_master(interface->pdev);
+		}
+		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+		fm10k_service_event_schedule(interface);
+	}
 
 	/* free any buffers still on the rings */
 	fm10k_clean_all_tx_rings(interface);

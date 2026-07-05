@@ -305,6 +305,28 @@ add_tail_frag:
 	return fm10k_can_reuse_rx_page(rx_buffer, page, truesize);
 }
 
+static void fm10k_rx_page_fault(struct fm10k_ring *rx_ring,
+				union fm10k_rx_desc *rx_desc,
+				struct fm10k_rx_buffer *rx_buffer)
+{
+	struct fm10k_intfc *interface = rx_ring->q_vector->interface;
+
+	netdev_err(rx_ring->netdev,
+		   "NULL Rx page on queue %u ntc=%u ntu=%u nta=%u staterr=0x%08x len=%u dma=%pad offset=%u down=%d resetting=%d reset_requested=%d\n",
+		   rx_ring->queue_index, rx_ring->next_to_clean,
+		   rx_ring->next_to_use, rx_ring->next_to_alloc,
+		   le32_to_cpu(rx_desc->d.staterr),
+		   le16_to_cpu(rx_desc->w.length), &rx_buffer->dma,
+		   rx_buffer->page_offset,
+		   test_bit(__FM10K_DOWN, interface->state),
+		   test_bit(__FM10K_RESETTING, interface->state),
+		   test_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags));
+
+	rx_ring->rx_stats.errors++;
+	set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+	fm10k_service_event_schedule(interface);
+}
+
 static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 					     union fm10k_rx_desc *rx_desc,
 					     struct sk_buff *skb)
@@ -314,7 +336,12 @@ static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 	struct page *page;
 
 	rx_buffer = &rx_ring->rx_buffer[rx_ring->next_to_clean];
-	page = rx_buffer->page;
+	page = READ_ONCE(rx_buffer->page);
+	if (unlikely(!page)) {
+		fm10k_rx_page_fault(rx_ring, rx_desc, rx_buffer);
+		return NULL;
+	}
+
 	prefetchw(page);
 
 	if (likely(!skb)) {
@@ -334,6 +361,7 @@ static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 			rx_ring->rx_stats.alloc_failed++;
 			return NULL;
 		}
+		skb->dev = rx_ring->netdev;
 
 		/* we will be copying header into skb->data in
 		 * pskb_may_pull so it is in our interest to prefetch
@@ -1549,6 +1577,7 @@ static int fm10k_poll(struct napi_struct *napi, int budget)
 {
 	struct fm10k_q_vector *q_vector =
 			       container_of(napi, struct fm10k_q_vector, napi);
+	struct fm10k_intfc *interface = q_vector->interface;
 	struct fm10k_ring *ring;
 	int per_ring_budget, work_done = 0;
 	bool clean_complete = true;
@@ -1585,7 +1614,10 @@ static int fm10k_poll(struct napi_struct *napi, int budget)
 	/* Exit the polling mode, but don't re-enable interrupts if stack might
 	 * poll us due to busy-polling
 	 */
-	if (likely(napi_complete_done(napi, work_done)))
+	if (likely(napi_complete_done(napi, work_done)) &&
+	    !test_bit(__FM10K_DOWN, interface->state) &&
+	    !test_bit(__FM10K_RESETTING, interface->state) &&
+	    !test_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags))
 		fm10k_qv_enable(q_vector);
 
 	return min(work_done, budget - 1);

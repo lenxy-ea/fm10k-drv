@@ -539,6 +539,7 @@ static int fm10k_set_ringparam(struct net_device *netdev,
 	struct fm10k_intfc *interface = netdev_priv(netdev);
 	struct fm10k_ring *temp_ring;
 	int i, err = 0;
+	int up_err;
 	u32 new_rx_count, new_tx_count;
 
 	if ((ring->rx_mini_pending) || (ring->rx_jumbo_pending))
@@ -641,7 +642,9 @@ static int fm10k_set_ringparam(struct net_device *netdev,
 	}
 
 err_setup:
-	fm10k_up(interface);
+	up_err = fm10k_up(interface);
+	if (up_err)
+		err = up_err;
 	vfree(temp_ring);
 clear_reset:
 	clear_bit(__FM10K_RESETTING, interface->state);

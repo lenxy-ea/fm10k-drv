@@ -683,7 +683,9 @@ int fm10k_open(struct net_device *netdev)
 	udp_tunnel_get_rx_info(netdev);
 #endif
 
-	fm10k_up(interface);
+	err = fm10k_up(interface);
+	if (err)
+		goto err_set_queues;
 
 	return 0;
 
