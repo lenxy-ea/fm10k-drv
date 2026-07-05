@@ -1503,7 +1503,8 @@ void fm10k_restore_rx_state(struct fm10k_intfc *interface)
 	fm10k_restore_udp_port_info(interface);
 }
 
-void fm10k_reset_rx_state(struct fm10k_intfc *interface)
+#define FM10K_MACVLAN_QUIESCE_RETRIES 1000
+int fm10k_reset_rx_state(struct fm10k_intfc *interface)
 {
 	struct net_device *netdev = interface->netdev;
 	struct fm10k_hw *hw = &interface->hw;
@@ -1511,10 +1512,10 @@ void fm10k_reset_rx_state(struct fm10k_intfc *interface)
 
 	/* Wait for MAC/VLAN work to finish */
 	while (test_bit(__FM10K_MACVLAN_SCHED, interface->state)) {
-		if (++macvlan_waits >= 1000) {
-			netdev_warn(netdev,
-				    "still waiting for MAC/VLAN work to quiesce during Rx reset\n");
-			macvlan_waits = 0;
+		if (++macvlan_waits >= FM10K_MACVLAN_QUIESCE_RETRIES) {
+			netdev_err(netdev,
+				   "MAC/VLAN work did not quiesce during Rx reset\n");
+			return -EBUSY;
 		}
 		usleep_range(1000, 2000);
 	}
@@ -1539,6 +1540,8 @@ void fm10k_reset_rx_state(struct fm10k_intfc *interface)
 	/* clear the sync flag since the lport has been dropped */
 	__dev_uc_unsync(netdev, NULL);
 	__dev_mc_unsync(netdev, NULL);
+
+	return 0;
 }
 
 #ifdef HAVE_NDO_GET_STATS64

@@ -2032,6 +2032,8 @@ int fm10k_up(struct fm10k_intfc *interface)
 	/* re-establish Rx filters */
 	fm10k_restore_rx_state(interface);
 
+	fm10k_resume_macvlan_task(interface);
+
 	/* enable transmits */
 	netif_tx_start_all_queues(interface->netdev);
 
@@ -2073,8 +2075,15 @@ int fm10k_down(struct fm10k_intfc *interface)
 	netif_tx_stop_all_queues(netdev);
 	netif_tx_disable(netdev);
 
+	fm10k_stop_macvlan_task(interface);
+
 	/* reset Rx filters */
-	fm10k_reset_rx_state(interface);
+	err = fm10k_reset_rx_state(interface);
+	if (err) {
+		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+		fm10k_service_event_schedule(interface);
+		return err;
+	}
 
 	/* disable polling routines */
 	fm10k_napi_disable_all(interface);
