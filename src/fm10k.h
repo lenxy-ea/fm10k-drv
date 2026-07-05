@@ -303,6 +303,7 @@ enum fm10k_state_t {
 	__FM10K_MACVLAN_DISABLE,
 	__FM10K_LINK_DOWN,
 	__FM10K_UPDATING_STATS,
+	__FM10K_DMA_QUIESCE_FAILED,
 	/* This value must be last and determines the BITMAP size */
 	__FM10K_STATE_SIZE__,
 };

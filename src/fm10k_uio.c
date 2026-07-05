@@ -54,6 +54,7 @@ static void fm10k_uio_irq_task(struct work_struct *work)
 
 	/* if the interface is resetting, just re-queue */
 	if (test_bit(__FM10K_RESETTING, interface->state)) {
+		msleep(20);
 		queue_work(fm10k_workqueue, &interface->uio_task);
 		return;
 	}

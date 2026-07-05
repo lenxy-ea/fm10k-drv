@@ -6,6 +6,8 @@
 
 #include "fm10k_type.h"
 
+#define FM10K_STATS_READ_RETRIES	32
+
 s32 fm10k_get_bus_info_generic(struct fm10k_hw *hw);
 s32 fm10k_get_invariants_generic(struct fm10k_hw *hw);
 s32 fm10k_disable_queues_generic(struct fm10k_hw *hw, u16 q_cnt);

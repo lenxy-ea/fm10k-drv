@@ -219,8 +219,15 @@ static void fm10k_service_timer(struct timer_list *t)
 static bool fm10k_prepare_for_reset(struct fm10k_intfc *interface)
 {
 	struct net_device *netdev = interface->netdev;
+	int err;
 
 	WARN_ON(in_interrupt());
+
+	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
+		netdev_err(netdev,
+			   "reset deferred because DMA did not quiesce\n");
+		return false;
+	}
 
 	/* put off any impending NetWatchDogTimeout */
 #ifdef HAVE_NETIF_TRANS_UPDATE
@@ -243,8 +250,17 @@ static bool fm10k_prepare_for_reset(struct fm10k_intfc *interface)
 
 	fm10k_iov_suspend(interface->pdev);
 
-	if (netif_running(netdev))
-		fm10k_close(netdev);
+	if (netif_running(netdev)) {
+		err = fm10k_close(netdev);
+		if (err) {
+			netdev_err(netdev,
+				   "reset deferred because close failed: %d\n",
+				   err);
+			rtnl_unlock();
+			clear_bit(__FM10K_RESETTING, interface->state);
+			return false;
+		}
+	}
 
 	fm10k_uio_free_irq(interface);
 	fm10k_mbx_free_irq(interface);
@@ -1240,6 +1256,67 @@ static void fm10k_mask_q_vectors(struct fm10k_intfc *interface)
 	}
 }
 
+static bool fm10k_wait_dma_quiesced(struct fm10k_intfc *interface,
+				    const char *context)
+{
+	struct fm10k_hw *hw = &interface->hw;
+	u32 dma_ctrl = 0;
+	int i;
+
+	if (FM10K_REMOVED(hw->hw_addr))
+		return true;
+
+	for (i = 0; i < 1000; i++) {
+		dma_ctrl = fm10k_read_reg(hw, FM10K_DMA_CTRL);
+		if (!~dma_ctrl ||
+		    !(dma_ctrl & (FM10K_DMA_CTRL_TX_ACTIVE |
+				  FM10K_DMA_CTRL_RX_ACTIVE)))
+			return true;
+
+		usleep_range(1000, 2000);
+	}
+
+	netdev_err(interface->netdev,
+		   "%s: DMA did not quiesce, DMA_CTRL=0x%08x\n",
+		   context, dma_ctrl);
+
+	return false;
+}
+
+static bool fm10k_quiesce_dma_before_release(struct fm10k_intfc *interface,
+					     const char *context)
+{
+	struct fm10k_hw *hw = &interface->hw;
+	int err;
+
+	if (FM10K_REMOVED(hw->hw_addr))
+		return true;
+
+	if (fm10k_wait_dma_quiesced(interface, context))
+		return true;
+
+	netdev_err(interface->netdev,
+		   "%s: clearing PCI bus mastering before DMA release\n",
+		   context);
+	pci_clear_master(interface->pdev);
+
+	if (fm10k_wait_dma_quiesced(interface, context))
+		return true;
+
+	netdev_err(interface->netdev,
+		   "%s: forcing hardware reset before DMA release\n",
+		   context);
+	err = hw->mac.ops.reset_hw(hw);
+	if (err) {
+		netdev_err(interface->netdev,
+			   "%s: reset_hw failed while quiescing DMA: %d\n",
+			   context, err);
+		return false;
+	}
+
+	return fm10k_wait_dma_quiesced(interface, context);
+}
+
 static irqreturn_t fm10k_msix_clean_rings(int __always_unused irq, void *data)
 {
 	struct fm10k_q_vector *q_vector = data;
@@ -1920,13 +1997,19 @@ int fm10k_up(struct fm10k_intfc *interface)
 			   "Rx configuration failed: %d\n", err);
 		fm10k_mask_q_vectors(interface);
 		stop_err = hw->mac.ops.stop_hw(hw);
-		if (stop_err) {
+		if (stop_err)
 			netdev_err(interface->netdev,
-				   "stop_hw failed after Rx configuration error: %d; disabling PCI bus mastering\n",
+				   "stop_hw failed after Rx configuration error: %d\n",
 				   stop_err);
-			if (!FM10K_REMOVED(hw->hw_addr))
-				pci_clear_master(interface->pdev);
+
+		if (!fm10k_quiesce_dma_before_release(interface,
+						      "Rx configuration error")) {
+			set_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state);
+			set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+			fm10k_service_event_schedule(interface);
+			return err;
 		}
+
 		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
 		fm10k_service_event_schedule(interface);
 		fm10k_clean_all_tx_rings(interface);
@@ -1975,6 +2058,7 @@ void fm10k_down(struct fm10k_intfc *interface)
 	struct net_device *netdev = interface->netdev;
 	struct fm10k_hw *hw = &interface->hw;
 	int err, i = 0, count = 0;
+	u32 stats_waits = 0;
 
 	/* signal that we are down to the interrupt handler and service task */
 	if (test_and_set_bit(__FM10K_DOWN, interface->state))
@@ -1999,8 +2083,14 @@ void fm10k_down(struct fm10k_intfc *interface)
 	fm10k_update_stats(interface);
 
 	/* prevent updating statistics while we're down */
-	while (test_and_set_bit(__FM10K_UPDATING_STATS, interface->state))
+	while (test_and_set_bit(__FM10K_UPDATING_STATS, interface->state)) {
+		if (++stats_waits >= 1000) {
+			netdev_warn(netdev,
+				    "still waiting for stats update to quiesce during shutdown\n");
+			stats_waits = 0;
+		}
 		usleep_range(1000, 2000);
+	}
 
 	/* skip waiting for TX DMA if we lost PCIe link */
 	if (FM10K_REMOVED(hw->hw_addr))
@@ -2047,13 +2137,15 @@ skip_tx_dma_drain:
 
 	if (err) {
 		fm10k_mask_q_vectors(interface);
-		if (!FM10K_REMOVED(hw->hw_addr)) {
-			dev_err(&interface->pdev->dev,
-				"disabling PCI bus mastering before releasing DMA buffers\n");
-			pci_clear_master(interface->pdev);
-		}
 		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
 		fm10k_service_event_schedule(interface);
+	}
+
+	if (!fm10k_quiesce_dma_before_release(interface, "shutdown")) {
+		set_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state);
+		set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
+		fm10k_service_event_schedule(interface);
+		return;
 	}
 
 	/* free any buffers still on the rings */

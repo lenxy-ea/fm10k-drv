@@ -21,7 +21,13 @@ __be16 ies_type_trans(struct sk_buff *skb)
 	skb->pkt_type = PACKET_OTHERHOST;
 
 	/* create room for IES header */
-	BUG_ON((skb_mac_header(skb) - skb->head) < (sizeof(struct fm10k_ies)));
+	if (unlikely(skb_headroom(skb) < sizeof(struct fm10k_ies))) {
+		if (skb->dev)
+			dev_warn_ratelimited(&skb->dev->dev,
+					     "dropping IES frame without IES headroom\n");
+		return 0;
+	}
+
 	skb->mac_header -= sizeof(struct fm10k_ies);
 	ies = (__be64 *)skb_mac_header(skb);
 

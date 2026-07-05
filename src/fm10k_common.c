@@ -330,6 +330,7 @@ static void fm10k_update_hw_stats_tx_q(struct fm10k_hw *hw,
 				       u32 idx)
 {
 	u32 id_tx, id_tx_prev, tx_packets;
+	u32 retries = FM10K_STATS_READ_RETRIES;
 	u64 tx_bytes = 0;
 
 	/* Retrieve TX Owner Data */
@@ -348,6 +349,12 @@ static void fm10k_update_hw_stats_tx_q(struct fm10k_hw *hw,
 		/* Re-Check Owner Data */
 		id_tx_prev = id_tx;
 		id_tx = fm10k_read_reg(hw, FM10K_TXQCTL(idx));
+
+		if (!((id_tx ^ id_tx_prev) & FM10K_TXQCTL_ID_MASK))
+			break;
+
+		if (!--retries)
+			return;
 	} while ((id_tx ^ id_tx_prev) & FM10K_TXQCTL_ID_MASK);
 
 	/* drop non-ID bits and set VALID ID bit */
@@ -381,6 +388,7 @@ static void fm10k_update_hw_stats_rx_q(struct fm10k_hw *hw,
 				       u32 idx)
 {
 	u32 id_rx, id_rx_prev, rx_packets, rx_drops;
+	u32 retries = FM10K_STATS_READ_RETRIES;
 	u64 rx_bytes = 0;
 
 	/* Retrieve RX Owner Data */
@@ -402,6 +410,12 @@ static void fm10k_update_hw_stats_rx_q(struct fm10k_hw *hw,
 		/* Re-Check Owner Data */
 		id_rx_prev = id_rx;
 		id_rx = fm10k_read_reg(hw, FM10K_RXQCTL(idx));
+
+		if (!((id_rx ^ id_rx_prev) & FM10K_RXQCTL_ID_MASK))
+			break;
+
+		if (!--retries)
+			return;
 	} while ((id_rx ^ id_rx_prev) & FM10K_RXQCTL_ID_MASK);
 
 	/* drop non-ID bits and set VALID ID bit */

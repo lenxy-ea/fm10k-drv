@@ -1429,6 +1429,7 @@ static void fm10k_update_hw_stats_pf(struct fm10k_hw *hw,
 {
 	u32 timeout, ur, ca, um, xec, vlan_drop, loopback_drop, nodesc_drop;
 	u32 id, id_prev;
+	u32 retries = FM10K_STATS_READ_RETRIES;
 
 	/* Use Tx queue 0 as a canary to detect a reset */
 	id = fm10k_read_reg(hw, FM10K_TXQCTL(0));
@@ -1454,6 +1455,12 @@ static void fm10k_update_hw_stats_pf(struct fm10k_hw *hw,
 		/* if value has not changed then we have consistent data */
 		id_prev = id;
 		id = fm10k_read_reg(hw, FM10K_TXQCTL(0));
+
+		if (!((id ^ id_prev) & FM10K_TXQCTL_ID_MASK))
+			break;
+
+		if (!--retries)
+			return;
 	} while ((id ^ id_prev) & FM10K_TXQCTL_ID_MASK);
 
 	/* drop non-ID bits and set VALID ID bit */

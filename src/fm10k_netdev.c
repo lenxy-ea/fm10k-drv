@@ -392,7 +392,7 @@ static void fm10k_free_udp_port_info(struct fm10k_intfc *interface)
 	while (port) {
 		list_del(&port->list);
 		kfree(port);
-		port = list_first_entry_or_null(&interface->vxlan_port,
+		port = list_first_entry_or_null(&interface->geneve_port,
 						struct fm10k_udp_port,
 						list);
 	}
@@ -643,6 +643,9 @@ int fm10k_open(struct net_device *netdev)
 	struct fm10k_intfc *interface = netdev_priv(netdev);
 	int err;
 
+	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state))
+		return -EBUSY;
+
 	/* allocate transmit descriptors */
 	err = fm10k_setup_all_tx_resources(interface);
 	if (err)
@@ -692,6 +695,8 @@ int fm10k_open(struct net_device *netdev)
 err_set_queues:
 	fm10k_qv_free_irq(interface);
 err_req_irq:
+	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state))
+		goto err_setup_tx;
 	fm10k_free_all_rx_resources(interface);
 err_setup_rx:
 	fm10k_free_all_tx_resources(interface);
@@ -703,22 +708,36 @@ err_setup_tx:
  * fm10k_close - Disables a network interface
  * @netdev: network interface device structure
  *
- * Returns 0, this is not allowed to fail
+	 * Returns 0, or -EBUSY if DMA did not quiesce and ring resources must
+	 * remain allocated.
  *
  * The close entry point is called when an interface is de-activated
- * by the OS.  The hardware is still under the drivers control, but
- * needs to be disabled.  A global MAC reset is issued to stop the
- * hardware, and all transmit and receive resources are freed.
+	 * by the OS.  The hardware is still under the drivers control, but
+	 * needs to be disabled.  A global MAC reset is issued to stop the
+	 * hardware, and transmit/receive resources are freed once DMA is no
+	 * longer active.
  **/
 int fm10k_close(struct net_device *netdev)
 {
 	struct fm10k_intfc *interface = netdev_priv(netdev);
+
+	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
+		netdev_err(netdev,
+			   "leaving Tx/Rx resources allocated because DMA did not quiesce\n");
+		return -EBUSY;
+	}
 
 	fm10k_down(interface);
 
 	fm10k_qv_free_irq(interface);
 
 	fm10k_free_udp_port_info(interface);
+
+	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
+		netdev_err(netdev,
+			   "leaving Tx/Rx resources allocated because DMA did not quiesce\n");
+		return -EBUSY;
+	}
 
 	fm10k_free_all_tx_resources(interface);
 	fm10k_free_all_rx_resources(interface);
@@ -750,8 +769,10 @@ static netdev_tx_t fm10k_xmit_frame(struct sk_buff *skb, struct net_device *dev)
 			return NETDEV_TX_OK;
 
 		/* make sure there is enough room to move the ethernet header */
-		if (unlikely(!pskb_may_pull(skb, VLAN_ETH_HLEN)))
+		if (unlikely(!pskb_may_pull(skb, VLAN_ETH_HLEN))) {
+			dev_kfree_skb(skb);
 			return NETDEV_TX_OK;
+		}
 
 		/* verify the skb head is not shared */
 		err = skb_cow_head(skb, 0);
@@ -1491,10 +1512,17 @@ void fm10k_reset_rx_state(struct fm10k_intfc *interface)
 {
 	struct net_device *netdev = interface->netdev;
 	struct fm10k_hw *hw = &interface->hw;
+	u32 macvlan_waits = 0;
 
 	/* Wait for MAC/VLAN work to finish */
-	while (test_bit(__FM10K_MACVLAN_SCHED, interface->state))
+	while (test_bit(__FM10K_MACVLAN_SCHED, interface->state)) {
+		if (++macvlan_waits >= 1000) {
+			netdev_warn(netdev,
+				    "still waiting for MAC/VLAN work to quiesce during Rx reset\n");
+			macvlan_waits = 0;
+		}
 		usleep_range(1000, 2000);
+	}
 
 	/* Cancel pending MAC/VLAN requests */
 	fm10k_clear_macvlan_queue(interface, interface->glort, true);
@@ -1620,8 +1648,11 @@ int fm10k_setup_tc(struct net_device *dev, u8 tc)
 	 * buffer alignment. Unfortunately, the hardware is not
 	 * flexible enough to do this dynamically.
 	 */
-	if (netif_running(dev))
-		fm10k_close(dev);
+	if (netif_running(dev)) {
+		err = fm10k_close(dev);
+		if (err)
+			return err;
+	}
 
 	fm10k_uio_free_irq(interface);
 	fm10k_mbx_free_irq(interface);

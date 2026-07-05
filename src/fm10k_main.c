@@ -242,6 +242,12 @@ static bool fm10k_can_reuse_rx_page(struct fm10k_rx_buffer *rx_buffer,
 	return true;
 }
 
+enum fm10k_rx_page_action {
+	FM10K_RX_PAGE_REUSE,
+	FM10K_RX_PAGE_UNMAP,
+	FM10K_RX_PAGE_UNMAP_FREE,
+};
+
 /**
  * fm10k_add_rx_frag - Add contents of Rx buffer to sk_buff
  * @rx_buffer: buffer containing page to add
@@ -255,12 +261,11 @@ static bool fm10k_can_reuse_rx_page(struct fm10k_rx_buffer *rx_buffer,
  * a frag to the skb.
  *
  * The function will then update the page offset if necessary and return
- * true if the buffer can be reused by the interface.
+ * how the caller should handle the page DMA mapping and ownership.
  **/
-static bool fm10k_add_rx_frag(struct fm10k_rx_buffer *rx_buffer,
-			      unsigned int size,
-			      union fm10k_rx_desc *rx_desc,
-			      struct sk_buff *skb)
+static enum fm10k_rx_page_action
+fm10k_add_rx_frag(struct fm10k_rx_buffer *rx_buffer, unsigned int size,
+		  union fm10k_rx_desc *rx_desc, struct sk_buff *skb)
 {
 	struct page *page = rx_buffer->page;
 	unsigned char *va = page_address(page) + rx_buffer->page_offset;
@@ -279,11 +284,10 @@ static bool fm10k_add_rx_frag(struct fm10k_rx_buffer *rx_buffer,
 
 		/* page is not reserved, we can reuse buffer as-is */
 		if (likely(!fm10k_page_is_reserved(page)))
-			return true;
+			return FM10K_RX_PAGE_REUSE;
 
-		/* this page cannot be reused so discard it */
-		__free_page(page);
-		return false;
+		/* this page cannot be reused and is not attached to the skb */
+		return FM10K_RX_PAGE_UNMAP_FREE;
 	}
 
 	/* we need the header to contain the greater of either ETH_HLEN or
@@ -302,7 +306,8 @@ add_tail_frag:
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
 			(unsigned long)va & ~PAGE_MASK, size, truesize);
 
-	return fm10k_can_reuse_rx_page(rx_buffer, page, truesize);
+	return fm10k_can_reuse_rx_page(rx_buffer, page, truesize) ?
+	       FM10K_RX_PAGE_REUSE : FM10K_RX_PAGE_UNMAP;
 }
 
 static void fm10k_rx_page_fault(struct fm10k_ring *rx_ring,
@@ -311,16 +316,18 @@ static void fm10k_rx_page_fault(struct fm10k_ring *rx_ring,
 {
 	struct fm10k_intfc *interface = rx_ring->q_vector->interface;
 
-	netdev_err(rx_ring->netdev,
-		   "NULL Rx page on queue %u ntc=%u ntu=%u nta=%u staterr=0x%08x len=%u dma=%pad offset=%u down=%d resetting=%d reset_requested=%d\n",
-		   rx_ring->queue_index, rx_ring->next_to_clean,
-		   rx_ring->next_to_use, rx_ring->next_to_alloc,
-		   le32_to_cpu(rx_desc->d.staterr),
-		   le16_to_cpu(rx_desc->w.length), &rx_buffer->dma,
-		   rx_buffer->page_offset,
-		   test_bit(__FM10K_DOWN, interface->state),
-		   test_bit(__FM10K_RESETTING, interface->state),
-		   test_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags));
+	if (net_ratelimit())
+		netdev_err(rx_ring->netdev,
+			   "NULL Rx page on queue %u ntc=%u ntu=%u nta=%u staterr=0x%08x len=%u dma=%pad offset=%u down=%d resetting=%d reset_requested=%d\n",
+			   rx_ring->queue_index, rx_ring->next_to_clean,
+			   rx_ring->next_to_use, rx_ring->next_to_alloc,
+			   le32_to_cpu(rx_desc->d.staterr),
+			   le16_to_cpu(rx_desc->w.length), &rx_buffer->dma,
+			   rx_buffer->page_offset,
+			   test_bit(__FM10K_DOWN, interface->state),
+			   test_bit(__FM10K_RESETTING, interface->state),
+			   test_bit(FM10K_FLAG_RESET_REQUESTED,
+				    interface->flags));
 
 	rx_ring->rx_stats.errors++;
 	set_bit(FM10K_FLAG_RESET_REQUESTED, interface->flags);
@@ -333,6 +340,7 @@ static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 {
 	unsigned int size = le16_to_cpu(rx_desc->w.length);
 	struct fm10k_rx_buffer *rx_buffer;
+	enum fm10k_rx_page_action page_action;
 	struct page *page;
 
 	rx_buffer = &rx_ring->rx_buffer[rx_ring->next_to_clean];
@@ -378,13 +386,16 @@ static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 				      DMA_FROM_DEVICE);
 
 	/* pull page into skb */
-	if (fm10k_add_rx_frag(rx_buffer, size, rx_desc, skb)) {
+	page_action = fm10k_add_rx_frag(rx_buffer, size, rx_desc, skb);
+	if (page_action == FM10K_RX_PAGE_REUSE) {
 		/* hand second half of page back to the ring */
 		fm10k_reuse_rx_page(rx_ring, rx_buffer);
 	} else {
 		/* we are not reusing the buffer so unmap it */
 		dma_unmap_page(rx_ring->dev, rx_buffer->dma,
 			       PAGE_SIZE, DMA_FROM_DEVICE);
+		if (page_action == FM10K_RX_PAGE_UNMAP_FREE)
+			__free_page(page);
 	}
 
 	/* clear contents of rx_buffer */
@@ -647,8 +658,9 @@ static int fm10k_clean_rx_irq(struct fm10k_q_vector *q_vector,
 			      struct fm10k_ring *rx_ring,
 			      int budget)
 {
-	struct sk_buff *skb = rx_ring->skb;
+	struct sk_buff *skb = rx_ring->skb, *next_skb;
 	unsigned int total_bytes = 0, total_packets = 0;
+	unsigned int bytes;
 	u16 cleaned_count = fm10k_desc_unused(rx_ring);
 
 	while (likely(total_packets < budget)) {
@@ -672,11 +684,12 @@ static int fm10k_clean_rx_irq(struct fm10k_q_vector *q_vector,
 		dma_rmb();
 
 		/* retrieve a buffer from the ring */
-		skb = fm10k_fetch_rx_buffer(rx_ring, rx_desc, skb);
+		next_skb = fm10k_fetch_rx_buffer(rx_ring, rx_desc, skb);
 
 		/* exit if we failed to retrieve a buffer */
-		if (!skb)
+		if (!next_skb)
 			break;
+		skb = next_skb;
 
 		cleaned_count++;
 
@@ -691,7 +704,14 @@ static int fm10k_clean_rx_irq(struct fm10k_q_vector *q_vector,
 		}
 
 		/* populate checksum, timestamp, VLAN, and protocol */
-		total_bytes += fm10k_process_skb_fields(rx_ring, rx_desc, skb);
+		bytes = fm10k_process_skb_fields(rx_ring, rx_desc, skb);
+		if (unlikely(!skb->protocol)) {
+			rx_ring->rx_stats.errors++;
+			dev_kfree_skb_any(skb);
+			skb = NULL;
+			continue;
+		}
+		total_bytes += bytes;
 
 		fm10k_receive_skb(q_vector, skb);
 

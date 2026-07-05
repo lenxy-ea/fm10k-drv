@@ -540,6 +540,7 @@ static int fm10k_set_ringparam(struct net_device *netdev,
 	struct fm10k_ring *temp_ring;
 	int i, err = 0;
 	int up_err;
+	u32 reset_waits = 0;
 	u32 new_rx_count, new_tx_count;
 
 	if ((ring->rx_mini_pending) || (ring->rx_jumbo_pending))
@@ -559,8 +560,14 @@ static int fm10k_set_ringparam(struct net_device *netdev,
 		return 0;
 	}
 
-	while (test_and_set_bit(__FM10K_RESETTING, interface->state))
+	while (test_and_set_bit(__FM10K_RESETTING, interface->state)) {
+		if (++reset_waits > 1000) {
+			netdev_warn(netdev,
+				    "reset did not quiesce while changing ring parameters\n");
+			return -EBUSY;
+		}
 		usleep_range(1000, 2000);
+	}
 
 	if (!netif_running(interface->netdev)) {
 		for (i = 0; i < interface->num_tx_queues; i++)
@@ -582,6 +589,11 @@ static int fm10k_set_ringparam(struct net_device *netdev,
 	}
 
 	fm10k_down(interface);
+	if (test_bit(__FM10K_DMA_QUIESCE_FAILED, interface->state)) {
+		err = -EBUSY;
+		vfree(temp_ring);
+		goto clear_reset;
+	}
 
 	/* Setup new Tx resources and free the old Tx resources in that order.
 	 * We can then assign the new resources to the rings via a memcpy.
