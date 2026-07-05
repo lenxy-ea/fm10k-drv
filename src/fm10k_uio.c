@@ -8,6 +8,13 @@ static inline struct fm10k_intfc *to_fm10k_intfc(struct uio_info *uio)
 	return container_of(uio, struct fm10k_intfc, uio);
 }
 
+static bool fm10k_uio_irq_can_arm(struct fm10k_intfc *interface)
+{
+	return test_bit(FM10K_FLAG_UIO_REGISTERED, interface->flags) &&
+	       !test_bit(__FM10K_UIO_IRQ_DISABLED, interface->state) &&
+	       READ_ONCE(interface->msix_entries);
+}
+
 static irqreturn_t fm10k_msix_uio(int __always_unused irq, void *data)
 {
 	struct uio_info *uio = (struct uio_info *)data;
@@ -28,10 +35,14 @@ static irqreturn_t fm10k_msix_uio(int __always_unused irq, void *data)
  **/
 static void fm10k_uio_set_irq(struct fm10k_intfc *interface, bool on)
 {
-	struct msix_entry *entry = &interface->msix_entries[FM10K_UIO_VECTOR];
+	struct msix_entry *entry;
 	struct fm10k_hw *hw = &interface->hw;
 	u32 itr = FM10K_ITR_AUTOMASK;
 
+	if (!READ_ONCE(interface->msix_entries))
+		return;
+
+	entry = &interface->msix_entries[FM10K_UIO_VECTOR];
 	itr |= on ? FM10K_ITR_MASK_CLEAR : FM10K_ITR_MASK_SET;
 
 	fm10k_write_reg(hw, FM10K_ITR(entry->entry), itr);
@@ -52,10 +63,14 @@ static void fm10k_uio_irq_task(struct work_struct *work)
 
 	interface = container_of(work, struct fm10k_intfc, uio_task);
 
+	if (!fm10k_uio_irq_can_arm(interface))
+		return;
+
 	/* if the interface is resetting, just re-queue */
 	if (test_bit(__FM10K_RESETTING, interface->state)) {
 		msleep(20);
-		queue_work(fm10k_workqueue, &interface->uio_task);
+		if (fm10k_uio_irq_can_arm(interface))
+			queue_work(fm10k_workqueue, &interface->uio_task);
 		return;
 	}
 
@@ -86,6 +101,9 @@ int fm10k_uio_request_irq(struct fm10k_intfc *interface)
 	if (!test_bit(FM10K_FLAG_UIO_REGISTERED, interface->flags))
 		return 0;
 
+	set_bit(__FM10K_UIO_IRQ_DISABLED, interface->state);
+	cancel_work_sync(&interface->uio_task);
+
 	/* request the IRQ */
 	err = request_irq(entry->vector, fm10k_msix_uio, 0, uio->name, uio);
 	if (err)
@@ -101,6 +119,8 @@ int fm10k_uio_request_irq(struct fm10k_intfc *interface)
 	/* Enable bits in EIMR register */
 	fm10k_write_reg(hw, FM10K_EIMR, FM10K_EIMR_ENABLE(SWITCHINTERRUPT));
 
+	clear_bit(__FM10K_UIO_IRQ_DISABLED, interface->state);
+
 	return 0;
 }
 
@@ -112,6 +132,9 @@ void fm10k_uio_free_irq(struct fm10k_intfc *interface)
 
 	if (!test_bit(FM10K_FLAG_UIO_REGISTERED, interface->flags))
 		return;
+
+	set_bit(__FM10K_UIO_IRQ_DISABLED, interface->state);
+	cancel_work_sync(&interface->uio_task);
 
 	/* no uio IRQ to free if MSI-X is not enabled */
 	if (!interface->msix_entries)
@@ -149,6 +172,7 @@ int fm10k_uio_probe(struct fm10k_intfc *interface)
 
 	/* initialize uio task */
 	INIT_WORK(&interface->uio_task, fm10k_uio_irq_task);
+	set_bit(__FM10K_UIO_IRQ_DISABLED, interface->state);
 
 	/* set driver name and version */
 	uio->name = fm10k_driver_name;
@@ -191,6 +215,7 @@ int fm10k_uio_probe(struct fm10k_intfc *interface)
 	fm10k_write_reg(hw, FM10K_EIMR, FM10K_EIMR_ENABLE(SWITCHINTERRUPT));
 
 	set_bit(FM10K_FLAG_UIO_REGISTERED, interface->flags);
+	clear_bit(__FM10K_UIO_IRQ_DISABLED, interface->state);
 
 	return 0;
 }

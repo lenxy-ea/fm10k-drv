@@ -84,10 +84,12 @@ static int fm10k_hw_ready(struct fm10k_intfc *interface)
  */
 void fm10k_macvlan_schedule(struct fm10k_intfc *interface)
 {
-	/* Avoid processing the MAC/VLAN queue when the service task is
-	 * disabled, or when we're resetting the device.
+	/* Avoid processing the MAC/VLAN queue when it is disabled, while
+	 * the interface is down, or while we're resetting the device.
 	 */
 	if (!test_bit(__FM10K_MACVLAN_DISABLE, interface->state) &&
+	    !test_bit(__FM10K_DOWN, interface->state) &&
+	    !test_bit(__FM10K_RESETTING, interface->state) &&
 	    !test_and_set_bit(__FM10K_MACVLAN_SCHED, interface->state)) {
 		clear_bit(__FM10K_MACVLAN_REQUEST, interface->state);
 		/* We delay the actual start of execution in order to allow
@@ -258,6 +260,7 @@ static bool fm10k_prepare_for_reset(struct fm10k_intfc *interface)
 				   err);
 			rtnl_unlock();
 			clear_bit(__FM10K_RESETTING, interface->state);
+			fm10k_resume_macvlan_task(interface);
 			return false;
 		}
 	}
@@ -352,9 +355,8 @@ static int fm10k_handle_reset(struct fm10k_intfc *interface)
 
 	rtnl_unlock();
 
-	fm10k_resume_macvlan_task(interface);
-
 	clear_bit(__FM10K_RESETTING, interface->state);
+	fm10k_resume_macvlan_task(interface);
 
 	return err;
 err_open:
@@ -2032,7 +2034,8 @@ int fm10k_up(struct fm10k_intfc *interface)
 	/* re-establish Rx filters */
 	fm10k_restore_rx_state(interface);
 
-	fm10k_resume_macvlan_task(interface);
+	if (!test_bit(__FM10K_RESETTING, interface->state))
+		fm10k_resume_macvlan_task(interface);
 
 	/* enable transmits */
 	netif_tx_start_all_queues(interface->netdev);
@@ -2092,11 +2095,12 @@ int fm10k_down(struct fm10k_intfc *interface)
 	fm10k_update_stats(interface);
 
 	/* prevent updating statistics while we're down */
+#define FM10K_STATS_QUIESCE_RETRIES 1000
 	while (test_and_set_bit(__FM10K_UPDATING_STATS, interface->state)) {
-		if (++stats_waits >= 1000) {
-			netdev_warn(netdev,
-				    "still waiting for stats update to quiesce during shutdown\n");
-			stats_waits = 0;
+		if (++stats_waits >= FM10K_STATS_QUIESCE_RETRIES) {
+			netdev_err(netdev,
+				   "stats update did not quiesce during shutdown; forcing shutdown forward\n");
+			break;
 		}
 		usleep_range(1000, 2000);
 	}
