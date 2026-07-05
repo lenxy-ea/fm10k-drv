@@ -1730,8 +1730,13 @@ static int fm10k_alloc_q_vector(struct fm10k_intfc *interface,
 		return -ENOMEM;
 
 	/* initialize NAPI */
+#if (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,8)))
+	netif_napi_add_weight(interface->netdev, &q_vector->napi,
+			      fm10k_poll, NAPI_POLL_WEIGHT);
+#else
 	netif_napi_add(interface->netdev, &q_vector->napi,
 		       fm10k_poll, NAPI_POLL_WEIGHT);
+#endif
 
 	/* tie q_vector and interface together */
 	interface->q_vector[v_idx] = q_vector;

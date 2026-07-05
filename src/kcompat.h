@@ -9,6 +9,9 @@
 #else
 #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
 #endif
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
 #include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -257,9 +260,11 @@ struct msix_entry {
 #define node_online(node) ((node) == 0)
 #endif
 
+#if ( LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0) )
 #ifndef num_online_cpus
 #define num_online_cpus() smp_num_cpus
 #endif
+#endif /* < 2.6.0 */
 
 #ifndef cpu_online
 #define cpu_online(cpuid) test_bit((cpuid), &cpu_online_map)
@@ -1677,6 +1682,10 @@ void *_kc_kmemdup(const void *src, size_t len, unsigned gfp);
 #else /* 2.6.19 */
 #include <linux/aer.h>
 #include <linux/pci_hotplug.h>
+#if (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,1)))
+#define pci_cleanup_aer_uncorrect_error_status(dev) \
+	pci_aer_clear_nonfatal_status(dev)
+#endif
 
 #define NEW_SKB_CSUM_HELP
 #endif /* < 2.6.19 */
@@ -2111,7 +2120,9 @@ void _kc_pci_disable_link_state(struct pci_dev *dev, int state);
 #define pci_disable_link_state(p, s) _kc_pci_disable_link_state(p, s)
 #else /* < 2.6.26 */
 #define NETDEV_CAN_SET_GSO_MAX_SIZE
+#if __has_include(<linux/pci-aspm.h>)
 #include <linux/pci-aspm.h>
+#endif
 #define HAVE_NETDEV_VLAN_FEATURES
 #ifndef PCI_EXP_LNKCAP_ASPMS
 #define PCI_EXP_LNKCAP_ASPMS 0x00000c00 /* ASPM Support */
@@ -5780,6 +5791,7 @@ static inline int _kc_macvlan_release_l2fw_offload(struct net_device *dev)
 #define HAVE_NDO_XDP_XMIT_BULK_AND_FLAGS
 #define NO_NDO_XDP_FLUSH
 #define HAVE_AF_XDP_SUPPORT
+#if !(RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,1)))
 #ifndef xdp_umem_get_data
 static inline char *__kc_xdp_umem_get_data(struct xdp_umem *umem, u64 addr)
 {
@@ -5796,6 +5808,7 @@ static inline dma_addr_t __kc_xdp_umem_get_dma(struct xdp_umem *umem, u64 addr)
 
 #define xdp_umem_get_dma __kc_xdp_umem_get_dma
 #endif /* !xdp_umem_get_dma */
+#endif /* !(RHEL >= 8.1) */
 #endif /* 4.18.0 */
 
 /*****************************************************************************/
@@ -5913,6 +5926,10 @@ ptp_read_system_postts(struct ptp_system_timestamp __always_unused *sts)
 #if (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,1)))
 #define HAVE_NDO_BRIDGE_SETLINK_EXTACK
 #endif /* RHEL 8.1 */
+#if (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,8)))
+#define HAVE_ETHTOOL_KERNEL_RINGPARAMS
+#define HAVE_ETHTOOL_KERNEL_COALESCE
+#endif /* RHEL 8.8 */
 #else /* >= 5.0.0 */
 #define HAVE_PTP_SYS_OFFSET_EXTENDED_IOCTL
 #define HAVE_NDO_BRIDGE_SETLINK_EXTACK
@@ -6035,7 +6052,8 @@ static inline bool flow_rule_match_key(const struct flow_rule *rule,
 #endif /* 5.1.0 */
 
 /*****************************************************************************/
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5,2,0))
+#if ((LINUX_VERSION_CODE < KERNEL_VERSION(5,2,0)) && \
+     !(RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,1))))
 #ifdef HAVE_SKB_XMIT_MORE
 #define netdev_xmit_more()	(skb->xmit_more)
 #else
@@ -6064,10 +6082,11 @@ __kc_eth_get_headlen(const struct net_device __always_unused *dev, void *data,
 #else /* >= 5.2.0 */
 #define HAVE_NDO_SELECT_QUEUE_FALLBACK_REMOVED
 #define SPIN_UNLOCK_IMPLIES_MMIOWB
-#endif /* 5.2.0 */
+#endif /* 5.2.0 && !(RHEL >= 8.1) */
 
 /*****************************************************************************/
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5,3,0))
+#if ((LINUX_VERSION_CODE < KERNEL_VERSION(5,3,0)) && \
+     !(RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,1))))
 #define flow_block_offload tc_block_offload
 #define flow_block_command tc_block_command
 #define flow_block_binder_type tcf_block_binder_type
@@ -6101,10 +6120,11 @@ int _kc_flow_block_cb_setup_simple(struct flow_block_offload *f,
 #else /* >= 5.3.0 */
 #define XSK_UMEM_RETURNS_XDP_DESC
 #define HAVE_FLOW_BLOCK_API
-#endif /* 5.3.0 */
+#endif /* 5.3.0 && !(RHEL >= 8.1) */
 
 /*****************************************************************************/
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0))
+#if ((LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)) && \
+     !(RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,1))))
 static inline unsigned int skb_frag_off(const skb_frag_t *frag)
 {
 	return frag->page_offset;
@@ -6119,6 +6139,6 @@ static inline void skb_frag_off_add(skb_frag_t *frag, int delta)
 #define __flow_indr_block_cb_unregister __tc_indr_block_cb_unregister
 #else /* >= 5.4.0 */
 #define HAVE_NDO_XSK_WAKEUP
-#endif /* 5.4.0 */
+#endif /* 5.4.0 && !(RHEL >= 8.1) */
 
 #endif /* _KCOMPAT_H_ */

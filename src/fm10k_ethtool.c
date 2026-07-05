@@ -505,7 +505,14 @@ static void fm10k_set_msglevel(struct net_device *netdev, u32 data)
 }
 
 static void fm10k_get_ringparam(struct net_device *netdev,
-				struct ethtool_ringparam *ring)
+				struct ethtool_ringparam *ring
+#ifdef HAVE_ETHTOOL_KERNEL_RINGPARAMS
+				,
+				struct kernel_ethtool_ringparam *kernel_ring
+				__always_unused,
+				struct netlink_ext_ack *extack __always_unused
+#endif
+				)
 {
 	struct fm10k_intfc *interface = netdev_priv(netdev);
 
@@ -520,7 +527,14 @@ static void fm10k_get_ringparam(struct net_device *netdev,
 }
 
 static int fm10k_set_ringparam(struct net_device *netdev,
-			       struct ethtool_ringparam *ring)
+			       struct ethtool_ringparam *ring
+#ifdef HAVE_ETHTOOL_KERNEL_RINGPARAMS
+			       ,
+			       struct kernel_ethtool_ringparam *kernel_ring
+			       __always_unused,
+			       struct netlink_ext_ack *extack __always_unused
+#endif
+			       )
 {
 	struct fm10k_intfc *interface = netdev_priv(netdev);
 	struct fm10k_ring *temp_ring;
@@ -635,7 +649,14 @@ clear_reset:
 }
 
 static int fm10k_get_coalesce(struct net_device *dev,
-			      struct ethtool_coalesce *ec)
+			      struct ethtool_coalesce *ec
+#ifdef HAVE_ETHTOOL_KERNEL_COALESCE
+			      ,
+			      struct kernel_ethtool_coalesce *kernel_coal
+			      __always_unused,
+			      struct netlink_ext_ack *extack __always_unused
+#endif
+			      )
 {
 	struct fm10k_intfc *interface = netdev_priv(dev);
 
@@ -649,7 +670,14 @@ static int fm10k_get_coalesce(struct net_device *dev,
 }
 
 static int fm10k_set_coalesce(struct net_device *dev,
-			      struct ethtool_coalesce *ec)
+			      struct ethtool_coalesce *ec
+#ifdef HAVE_ETHTOOL_KERNEL_COALESCE
+			      ,
+			      struct kernel_ethtool_coalesce *kernel_coal
+			      __always_unused,
+			      struct netlink_ext_ack *extack __always_unused
+#endif
+			      )
 {
 	struct fm10k_intfc *interface = netdev_priv(dev);
 	u16 tx_itr, rx_itr;

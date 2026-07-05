@@ -814,7 +814,13 @@ static int fm10k_change_mtu(struct net_device *dev, int new_mtu)
  * fm10k_tx_timeout - Respond to a Tx Hang
  * @netdev: network interface device structure
  **/
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)) || \
+    (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,8)))
+static void fm10k_tx_timeout(struct net_device *netdev,
+			     unsigned int __always_unused txqueue)
+#else
 static void fm10k_tx_timeout(struct net_device *netdev)
+#endif
 {
 	struct fm10k_intfc *interface = netdev_priv(netdev);
 	bool real_tx_hang = false;
