@@ -10,11 +10,68 @@ November 26, 2018
 Contents
 --------
 
+- NetLab SwitchOS Adaptation and Freeze Report
 - Overview
 - Building and Installation
 - Command Line Parameters
 - Additional Features & Configurations
 - Known Issues
+
+
+NetLab SwitchOS Adaptation and Freeze Report
+============================================
+
+Purpose
+-------
+This repository carries the NetLab SwitchOS adaptation of the Intel(R) fm10k
+Ethernet Switch Host Interface Driver. The adapted module is intended for the
+NetLab SwitchOS switch host environment and its public L3 forwarding,
+replay/restart, link recovery, and long-soak validation workflow.
+
+Adapted Target
+--------------
+- Project: NetLab SwitchOS
+- Driver base: Intel(R) fm10k 0.27.1
+- NetLab module version: 0.27.1-netlab
+- Module description: NetLab Switch OS fm10k Ethernet Switch Host Interface
+  Driver
+- Target kernel: 4.18.0-553.124.1.el8_10.x86_64
+- Target OS family: RHEL 8.10 compatible kernel and module ABI
+- Frozen commit: 78f3933 Mark fm10k module metadata for NetLab
+- Frozen module srcversion: D857784FB5318303E2AD1C2
+
+Design Freeze Evidence
+----------------------
+- Build validation passed with `make -C src` against
+  4.18.0-553.124.1.el8_10.x86_64 kernel headers.
+- `modinfo src/fm10k.ko` reports:
+  - `version: 0.27.1-netlab`
+  - `description: NetLab Switch OS fm10k Ethernet Switch Host Interface Driver`
+  - `srcversion: D857784FB5318303E2AD1C2`
+  - `depends: uio`
+  - `vermagic: 4.18.0-553.124.1.el8_10.x86_64 SMP mod_unload modversions`
+- The NetLab SwitchOS adaptation was validated by the 480 minute soak log:
+  `/opt/netlab/.tmp/soak-logs/fm10k-480m-20260706-003448.log`.
+- Soak verdict: pass.
+- Soak coverage included public L3 commit transaction, ECMP member removal,
+  neighbor churn, route churn, one active replay cycle, link flap recovery,
+  read-back mismatch checks, and a final 480 minute long soak at 100000pps.
+- Final TRex counters were:
+  - `tx=2879994835`
+  - `rx=2880010674`
+  - `minimum-rx=1439997417`
+- Kernel log review during the soak window found no fm10k-related Oops, panic,
+  BUG, NETDEV WATCHDOG, DMA quiesce failure, reset failure, or workqueue
+  lifetime failure.
+
+Freeze Conclusion
+-----------------
+The fm10k driver adaptation is design-frozen for NetLab SwitchOS integration at
+commit `78f3933` with module version `0.27.1-netlab`. The project has completed
+the required build, module identity, public L3 forwarding, replay/restart, link
+recovery, and long-soak validation for the stated NetLab SwitchOS target. Any
+future behavior-changing driver patch should restart the validation cycle before
+replacing this frozen baseline.
 
 
 Important Notes
@@ -465,5 +522,3 @@ Intel is a trademark or registered trademark of Intel Corporation or its
 subsidiaries in the United States and/or other countries.
 
 * Other names and brands may be claimed as the property of others.
-
-
