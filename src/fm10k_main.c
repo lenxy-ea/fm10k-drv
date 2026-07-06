@@ -13,8 +13,8 @@
 
 #include "fm10k.h"
 
-#define DRV_VERSION	"0.27.1"
-#define DRV_SUMMARY	"Intel(R) Ethernet Switch Host Interface Driver"
+#define DRV_VERSION	"0.27.1-netlab"
+#define DRV_SUMMARY	"NetLab Switch OS fm10k Ethernet Switch Host Interface Driver"
 const char fm10k_driver_version[] = DRV_VERSION;
 char fm10k_driver_name[] = "fm10k";
 static const char fm10k_driver_string[] = DRV_SUMMARY;
